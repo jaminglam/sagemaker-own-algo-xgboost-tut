@@ -12,6 +12,8 @@ import pickle
 import sys
 import traceback
 
+import numpy as np
+
 import pandas as pd
 
 import xgboost
@@ -82,9 +84,9 @@ def train():
         )
         clf = clf.fit(train_X, train_y)
         test_predictions = clf.predict(test_X)
+        test_predictions = pd.Series(data=test_predictions)
         test_predictions = test_predictions.apply(
             lambda iris_class: iris_class_id_dict[iris_class])
-        print(test_predictions)
         test_y = test_y.apply(
             lambda iris_class: iris_class_id_dict[iris_class])
         accuracy = accuracy_score(test_y, test_predictions)
