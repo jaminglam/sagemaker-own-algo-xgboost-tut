@@ -16,6 +16,9 @@ import pandas as pd
 
 import xgboost
 
+from sklearn.metrics import accuracy_score
+
+
 # These are the paths to where SageMaker mounts interesting things in your container.
 
 prefix = '/opt/ml/'
@@ -23,38 +26,69 @@ prefix = '/opt/ml/'
 input_path = prefix + 'input/data'
 output_path = os.path.join(prefix, 'output')
 model_path = os.path.join(prefix, 'model')
+sagemaker_config_path = os.path.join(prefix + 'input', 'config')
 
-# This algorithm has a single channel of input data called 'training'. Since we run in
-# File mode, the input files are copied to the directory specified here.
-channel_name='training'
-training_path = os.path.join(input_path, channel_name)
+# This algorithm has channel of input data called 'training' and 'testing'.
+# Since we run in File mode, the input files are copied to the directory
+# specified here.
+channel_training = 'training'
+channel_testing = 'testing'
+training_path = os.path.join(input_path, channel_training)
+testing_path = os.path.join(input_path, channel_testing)
+
+iris_class_id_dict = {'setosa': 0, 'versicolor': 1, 'virginica': 2}
+
+def read_channel_data(channel_name):
+    # Take the set of files and read them all into a single pandas dataframe
+    channel_path = os.path.join(input_path, channel_name)
+    input_files = [os.path.join(channel_path, file)
+                   for file in os.listdir(channel_path)]
+    if len(input_files) == 0:
+        raise ValueError((
+            'There are no files in {}.\n' +
+            'This usually indicates that the channel ({}) was incorrect,\n' +
+            'the data specification in S3 was incorrectly specified,\n' +
+            'or the role does not have permission to access the data.'
+        ).format(channel_path, channel_name))
+    raw_data_list = [pd.read_csv(file, header=None) for file in input_files]
+    data = pd.concat(raw_data_list)
+    return data
+
 
 # The function to execute the training.
 def train():
     print('Starting the training.')
     try:
-
-        # Take the set of files and read them all into a single pandas dataframe
-        input_files = [ os.path.join(training_path, file) for file in os.listdir(training_path) ]
-        if len(input_files) == 0:
-            raise ValueError(('There are no files in {}.\n' +
-                              'This usually indicates that the channel ({}) was incorrectly specified,\n' +
-                              'the data specification in S3 was incorrectly specified or the role specified\n' +
-                              'does not have permission to access the data.').format(training_path, channel_name))
-        raw_data = [ pd.read_csv(file, header=None) for file in input_files ]
-        train_data = pd.concat(raw_data)
+        train_data = read_channel_data(channel_training)
+        test_data = read_channel_data(channel_testing)
 
         # labels are in the first column
-        train_y = train_data.ix[:,0]
-        train_X = train_data.ix[:,1:]
+        train_y = train_data.ix[:, 0]
+        train_X = train_data.ix[:, 1:]
 
+        test_y = test_data.ix[:, 0]
+        test_X = test_data.ix[:, 1:]
+        # load hyperparameter
+        hyperparameter_path = os.path.join(
+            sagemaker_config_path, 'hyperparameters.json')
+        with open(hyperparameter_path) as hyperparameter_file:
+            hyperparameters = json.load(hyperparameter_file)
+        print(hyperparameters)
+        max_depth = hyperparameters['max_depth']
         # Now use scikit-learn's decision tree classifier to train the model.
         clf = xgboost.XGBClassifier(
-            max_depth=3, learning_rate=0.1,
+            max_depth=max_depth, learning_rate=0.1,
             n_estimators=100, objective='binary:logistic'
         )
         clf = clf.fit(train_X, train_y)
-
+        test_predictions = clf.predict(test_X)
+        test_predictions = test_predictions.apply(
+            lambda iris_class: iris_class_id_dict[iris_class])
+        print(test_predictions)
+        test_y = test_y.apply(
+            lambda iris_class: iris_class_id_dict[iris_class])
+        accuracy = accuracy_score(test_y, test_predictions)
+        print("validation-accuracy={}".format(accuracy))
         # save the model
         with open(os.path.join(model_path, 'xgboost-model.pkl'), 'wb') as out:
             pickle.dump(clf, out, protocol=0)
@@ -69,6 +103,7 @@ def train():
         print('Exception during training: ' + str(e) + '\n' + trc, file=sys.stderr)
         # A non-zero exit code causes the training job to be marked as Failed.
         sys.exit(255)
+
 
 if __name__ == '__main__':
     train()
